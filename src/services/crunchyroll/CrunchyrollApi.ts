@@ -2,7 +2,8 @@ import { ServiceApi, ServiceApiSession } from '@apis/ServiceApi';
 import { Requests, withHeaders } from '@common/Requests';
 import { EpisodeItem, MovieItem, ScrobbleItem } from '@models/Item';
 import { CrunchyrollService } from '@/crunchyroll/CrunchyrollService';
-import { Utils } from '@common/Utils';
+import { HistoryCache } from '@common/Cache';
+import { hasCorruptHistoryDates, historyDateToUnix } from './HistoryDates';
 
 export interface CrunchyrollSession extends ServiceApiSession {
 	tokenExpirationDate: Date;
@@ -26,7 +27,7 @@ export interface CrunchyrollHistoryPage {
 
 export interface CrunchyrollHistoryItem {
 	id: string;
-	date_played: Date;
+	date_played?: string | number | Date;
 	fully_watched: boolean;
 	playhead: number;
 	parent_id: string;
@@ -47,7 +48,7 @@ export interface CrunchyrollEpisodeMetadata {
 	episode: string;
 	episode_number: number;
 	sequence_number: number;
-	episode_air_date: Date;
+	episode_air_date?: string | number | Date;
 	season_title: string;
 	season_slug_title: string;
 	series_title: string;
@@ -128,7 +129,7 @@ class _CrunchyrollApi extends ServiceApi {
 	}
 
 	async checkLogin() {
-		if (!this.isActivated || (!!this.session && new Date() < this.session.tokenExpirationDate)) {
+		if (!this.isActivated || !this.session || new Date() >= this.session.tokenExpirationDate) {
 			await this.activate();
 		}
 		return !!this.session && this.session.profileName !== null;
@@ -148,10 +149,8 @@ class _CrunchyrollApi extends ServiceApi {
 			method: 'GET',
 			cancelKey,
 		});
-		const page = this.parseJsonWithDates<CrunchyrollHistoryPage>(responseText, [
-			'date_played',
-			'episode_air_date',
-		]);
+		// Keep dates as JSON primitives: these rows also pass through browser storage and messaging.
+		const page = JSON.parse(responseText) as CrunchyrollHistoryPage;
 
 		let historyItems: CrunchyrollHistoryItem[] = [];
 		// Filter out entries with missing information.
@@ -169,7 +168,13 @@ class _CrunchyrollApi extends ServiceApi {
 	}
 
 	isNewHistoryItem(historyItem: CrunchyrollHistoryItem, lastSync: number) {
-		return Utils.unix(historyItem.date_played) > lastSync;
+		const watchedAt = historyDateToUnix(historyItem.date_played);
+		// An unknown date cannot prove we reached the last sync; keep scanning older rows.
+		return watchedAt === undefined || watchedAt > lastSync;
+	}
+
+	protected isHistoryCacheValid(historyCache: HistoryCache): boolean {
+		return !hasCorruptHistoryDates(historyCache.items);
 	}
 
 	getHistoryItemId(historyItem: CrunchyrollHistoryItem): string {
@@ -186,6 +191,9 @@ class _CrunchyrollApi extends ServiceApi {
 
 		for (const historyItem of historyItems) {
 			const metadata = historyItem.panel.episode_metadata;
+			const airedAt = historyDateToUnix(metadata.episode_air_date);
+			const year = airedAt === undefined ? undefined : new Date(airedAt * 1000).getUTCFullYear();
+			const watchedAt = historyDateToUnix(historyItem.date_played);
 			const title = this.getNormalizedTitle(historyItem);
 			const thumbnail = historyItem.panel.images?.thumbnail
 				?.find((o) => o.length > 0)
@@ -197,8 +205,8 @@ class _CrunchyrollApi extends ServiceApi {
 					serviceId: this.id,
 					title: title,
 					imageUrl: thumbnail?.source,
-					year: new Date(metadata.episode_air_date).getUTCFullYear(),
-					watchedAt: Utils.unix(historyItem.date_played),
+					year,
+					watchedAt,
 					progress: historyItem.fully_watched
 						? 100
 						: (historyItem.playhead / metadata.duration_ms) * 100,
@@ -217,8 +225,8 @@ class _CrunchyrollApi extends ServiceApi {
 					// Crunchyroll often numbers anime episodes sequentially across all seasons,
 					// so allow episode matching to resolve the number as absolute.
 					isAbsolute: true,
-					year: new Date(metadata.episode_air_date).getUTCFullYear(),
-					watchedAt: Utils.unix(historyItem.date_played),
+					year,
+					watchedAt,
 					progress: historyItem.fully_watched
 						? 100
 						: (historyItem.playhead / metadata.duration_ms) * 100,
@@ -275,16 +283,6 @@ class _CrunchyrollApi extends ServiceApi {
 			);
 		}
 		return title;
-	}
-
-	parseJsonWithDates<T>(text: string, dateFieldNames: string[]): T {
-		const dateReviver = (key: string, value: unknown) => {
-			return dateFieldNames.includes(key) &&
-				(typeof value === 'string' || typeof value === 'number')
-				? new Date(value)
-				: value;
-		};
-		return JSON.parse(text, dateReviver) as T;
 	}
 }
 

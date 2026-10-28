@@ -9,6 +9,7 @@
 		"url": "git://github.com/trakt-tools/universal-trakt-scrobbler.git"
 	},
 	"scripts": {
+		"test": "node --test tests/*.cjs",
 		"build": "cross-env ENV=production webpack --env production",
 		"build-dev": "cross-env ENV=development webpack --env development",
 		"start": "webpack --env development --env watch",

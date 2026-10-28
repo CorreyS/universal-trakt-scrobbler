@@ -172,6 +172,7 @@ export abstract class ServiceApi {
 						this.hasCheckedHistoryCache = true;
 						if (
 							historyCache.items.length > 0 &&
+							this.isHistoryCacheValid(historyCache) &&
 							this.isHistoryCacheForCurrentProfile(historyCache)
 						) {
 							const reconciled = await this.reconcileHistoryCache(
@@ -278,6 +279,11 @@ export abstract class ServiceApi {
 			throw err;
 		}
 		return items;
+	}
+
+	/** Services can reject legacy cached rows that cannot be safely reused. */
+	protected isHistoryCacheValid(_historyCache: HistoryCache): boolean {
+		return true;
 	}
 
 	/**
