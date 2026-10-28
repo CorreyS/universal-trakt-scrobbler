@@ -5,7 +5,7 @@ import { EpisodeItem, MovieItem } from '@models/Item';
 class _HboMaxParser extends ScrobbleParser {
 	constructor() {
 		super(HboMaxApi, {
-			watchingUrlRegex: /video\/watch\/(?<showId>[a-f0-9-]+)\/(?<id>[a-f0-9-]+)/,
+			watchingUrlRegex: /video\/watch\/(?:[a-f0-9-]+\/)?(?<id>[a-f0-9-]+)/,
 		});
 	}
 

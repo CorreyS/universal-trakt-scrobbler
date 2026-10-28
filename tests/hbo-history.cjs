@@ -50,6 +50,7 @@ function makeApi(respond) {
 		},
 		'@models/Item': { EpisodeItem: Item },
 		'@common/HistoryDate': dates,
+		'@common/RequestError': { RequestError: class RequestError extends Error {} },
 		'@common/Cache': {
 			Cache: {
 				get: async () => cache,
@@ -110,12 +111,17 @@ test('HBO concurrent shows keep independent pagination and cached titles', async
 					attributes: { showType: 'SERIES', name: `Show ${id}` },
 				})),
 			};
+		assert.equal(url.searchParams.get('page[size]'), '20');
+		assert.equal(request.credentials, 'include');
+		assert.ok(request.headers['x-device-info']);
 		const show = url.searchParams.get('filter[show.id]');
 		const page = Number(url.searchParams.get('page[number]'));
 		calls.push(`${show}-${page}`);
 		// B finishes before A, exposing the original shared-page-state race.
 		await new Promise((resolve) => setTimeout(resolve, show === 'a' ? 5 : 0));
-		return { data: [episode(String(show), page)], meta: { totalPages: show === 'a' ? 3 : 1 } };
+		const row = episode(String(show), page);
+		delete row.relationships.show;
+		return { data: [row], meta: { totalPages: show === 'a' ? 3 : 1 } };
 	});
 	api.isActivated = true;
 	api.session = { profileName: 'Test Profile' };

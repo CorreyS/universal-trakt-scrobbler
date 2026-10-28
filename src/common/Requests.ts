@@ -12,6 +12,7 @@ export type RequestDetails = {
 	signal?: AbortSignal;
 	cancelKey?: string;
 	withHeaders?: Record<string, string>;
+	credentials?: RequestCredentials;
 };
 
 export interface RequestOptions {
@@ -240,6 +241,7 @@ class _Requests {
 			headers: options.headers,
 			body: options.body,
 			signal: request.signal,
+			credentials: request.credentials,
 		});
 	}
 
