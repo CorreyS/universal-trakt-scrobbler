@@ -23,7 +23,9 @@ function loadSource(file, imports = {}) {
 	);
 	return module.exports;
 }
-const dates = loadSource('src/services/crunchyroll/HistoryDates.ts');
+const dates = loadSource('src/services/crunchyroll/HistoryDates.ts', {
+	'@common/HistoryDate': loadSource('src/common/HistoryDate.ts'),
+});
 /** @param {any} base */
 function makeApi(base = undefined) {
 	class ServiceApi {

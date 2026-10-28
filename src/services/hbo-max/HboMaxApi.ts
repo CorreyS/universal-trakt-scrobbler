@@ -1,465 +1,292 @@
-import { HboMaxService } from '@/hbo-max/HboMaxService';
+import { Requests } from '@common/Requests';
 import { ServiceApi, ServiceApiSession } from '@apis/ServiceApi';
-import { Cache } from '@common/Cache';
-import { Requests, withHeaders } from '@common/Requests';
-import { ScriptInjector } from '@common/ScriptInjector';
-import { Shared } from '@common/Shared';
-import { Utils } from '@common/Utils';
-import { EpisodeItem, MovieItem, ScrobbleItem, ScrobbleItemValues } from '@models/Item';
+import { EpisodeItem, ScrobbleItem, ScrobbleItemValues } from '@models/Item';
+import { historyDateToUnix } from '@common/HistoryDate';
+import { Cache, CacheItem } from '@common/Cache';
+import { HboMaxService } from '@/hbo-max/HboMaxService';
 
-export interface HboMaxAuthObj {
-	access_token: string;
-	refresh_token: string;
-
-	/** In milliseconds */
-	expires_on: number;
+export interface HbomaxSession extends ServiceApiSession {
+	profileName: string;
 }
 
-export interface HboMaxSession extends ServiceApiSession, HboMaxData {}
-
-export interface HboMaxData {
-	subdomain: string;
-	auth: {
-		accessToken: string;
-		refreshToken: string;
-
-		/** A UNIX timestamp in seconds */
-		expiresAt: number;
-	};
-	deviceSerialNumber: string;
-}
-
-export interface HboMaxProfile {
-	profileId: string;
-	name: string;
-	isMe: boolean;
-}
-
-export interface HboMaxHistoryItem {
+export interface HbomaxHistoryItem {
 	id: string;
-	progress: number;
-	watchedAt: number;
-}
-
-export type HboMaxItemMetadata = HboMaxEpisodeMetadata | HboMaxMovieMetadata;
-
-export interface HboMaxEpisodeMetadata {
-	titles: {
-		full: string;
+	showName?: string;
+	attributes: {
+		seasonNumber: number;
+		episodeNumber: number;
+		name: string;
+		videoType: string;
+		airDate: string;
+		firstAvailableDate: string;
+		viewingHistory: {
+			viewed: boolean;
+			completed?: boolean;
+			lastReportedTimestamp?: string;
+		};
 	};
-	releaseYear: number;
-	seriesTitles: {
-		full: string;
-	};
-	numberInSeason: number;
-	seasonNumber: number;
-	references: {
-		/** Format: urn:hbo:series:XXXXXXXXXXXXXXXXXXXX */
-		series: string;
-	};
+	relationships: { show: { data: { id: string; type: string } } };
 }
 
-export interface HboMaxMovieMetadata {
-	titles: {
-		full: string;
-	};
-	releaseYear: number;
+export interface HbomaxProfileData {
+	data: { attributes: { profileName: string } };
 }
 
-export interface HboMaxAuthResponse {
-	access_token: string;
-	refresh_token: string;
-
-	/** In seconds */
-	expires_in: number;
+export interface HbomaxRouting {
+	homeMarket: string;
+	env: string;
+	tenant: string;
+	domain: string;
 }
 
-export interface HboMaxConfigResponse {
-	routeKeys: {
-		userSubdomain: string;
-	};
+export interface CachedRouting {
+	routing?: HbomaxRouting;
+	timestamp: number;
 }
 
-export type HboMaxProfileResponse = HboMaxContentResponse<HboMaxProfileResponseItem>;
+// Adapted from upstream PR #463; pagination state is local to each show.
+class _HbomaxApi extends ServiceApi {
+	public session: HbomaxSession | null = null;
+	public hasReachedHistoryEnd = false;
+	public showNameMap: Record<string, string> = {};
+	public isActivated = false;
 
-export interface HboMaxProfileResponseItem {
-	profiles: HboMaxProfile[];
-}
-
-export type HboMaxHistoryResponse = HboMaxHistoryResponseItem[];
-
-export interface HboMaxHistoryResponseItem {
-	/**
-	 * Formats:
-	 *
-	 * - urn:hbo:episode:XXXXXXXXXXXXXXXXXXXX
-	 * - urn:hbo:feature:XXXXXXXXXXXXXXXXXXXX
-	 */
-	id: string;
-
-	position: number;
-	runtime: number;
-
-	/** Format: yyyy-MM-ddTHH:mm:ssZ */
-	created: string;
-}
-
-export type HboMaxItemMetadataResponse = HboMaxContentResponse<
-	HboMaxEpisodeMetadata | HboMaxMovieMetadata
->;
-
-export type HboMaxContentResponse<T> = (
-	| HboMaxContentSuccessResponse<T>
-	| HboMaxContentErrorResponse
-)[];
-
-export interface HboMaxContentSuccessResponse<T> {
-	id: string;
-	body: T;
-}
-
-export interface HboMaxContentErrorResponse {
-	id: string;
-	body: {
-		message: string;
-	};
-}
-
-class _HboMaxApi extends ServiceApi {
-	HOST_URL = 'https://play.hbomax.com';
-	API_BASE = 'api.hbo.com';
-	GLOBAL_AUTH_URL = `https://oauth.${this.API_BASE}/auth/tokens`;
-	LOCAL_AUTH_URL = `https://gateway{subdomain}.${this.API_BASE}/auth/tokens`;
-	CONFIG_URL = `https://sessions.${this.API_BASE}/sessions/v1/clientConfig`;
-	CONTENT_URL = `https://comet{subdomain}.${this.API_BASE}/content`;
-	HISTORY_URL = `https://markers{subdomain}.${this.API_BASE}/markers`;
-
-	/**
-	 * These values were retrieved from https://play.hbomax.com/js/app.js:
-	 *
-	 * - to find `CLIENT_VERSION`, search for `versionString="` to get the first fragment, then search for `displayVersion:"` to get the next fragment, and the last fragment should be the platform (`desktop`)
-	 * - to find `CLIENT_ID`, search for `ClientIDs:{` and get the `desktop` property
-	 * - to find `CONTRACT`, search for `contract:"`
-	 */
-	CLIENT_VERSION = 'Hadron/50.41.0.9 desktop';
-	CLIENT_ID = '585b02c8-dbe1-432f-b1bb-11cf670fbeb0';
-	CONTRACT = 'hadron:1.1.2.0';
-
-	requests = Requests;
-	authRequests = Requests;
-
-	isActivated = false;
-	session?: HboMaxSession | null;
+	private API_URL = 'https://default.any-any.prd.api.hbomax.com';
+	private PROFILE_URL = `${this.API_URL}/users/me/profiles/selected`;
+	private ALLSHOWS_URL =
+		`${this.API_URL}/cms/routes/my-stuff?include=default&decorators=viewingHistory,isFavorite,contentAction,badges&page[items.size]=100`;
 
 	constructor() {
 		super(HboMaxService.id);
 	}
 
-	async activate() {
-		if (this.session === null) {
+	/* ---------------- API ROUTING ---------------- */
+
+	private async initApiUrl(): Promise<void> {
+		const env = 'prd';
+		const domain = 'api.hbomax.com';
+		const cacheKey = 'servicesData';
+		const ttl = 7 * 24 * 60 * 60 * 1000;
+
+		const cacheItem: CacheItem<'servicesData'> | undefined = await Cache.get(cacheKey);
+		const cached = cacheItem?.get(this.id) as CachedRouting | undefined;
+
+		if (cached?.routing && Date.now() - cached.timestamp < ttl) {
+			this.applyRouting(cached.routing);
 			return;
 		}
 
+		const bootstrapUrl = `https://default.any-any.${env}.${domain}/session-context/headwaiter/v1/bootstrap`;
+
+		const responseText = await Requests.send({
+			url: bootstrapUrl,
+			method: 'POST',
+			headers: {
+				'x-disco-client': 'WEB:10.15.7:hbomax:6.17.0',
+				'x-disco-params': 'realm=bolt,bid=beam,features=ar',
+			},
+			body: '{}',
+		});
+
+		const bootstrap = JSON.parse(responseText) as { routing?: HbomaxRouting };
+		if (!bootstrap.routing) throw new Error('Invalid bootstrap');
+
+		this.applyRouting(bootstrap.routing);
+		cacheItem?.set(this.id, { routing: bootstrap.routing, timestamp: Date.now() });
+		if (cacheItem) await Cache.set({ servicesData: cacheItem });
+	}
+
+	private applyRouting(routing: HbomaxRouting): void {
+		if (
+			!['api.hbomax.com', 'api.max.com'].includes(routing.domain) ||
+			![routing.tenant, routing.homeMarket, routing.env].every((part) => /^[a-z0-9-]+$/i.test(part))
+		) {
+			throw new Error('Invalid HBO Max routing');
+		}
+		this.API_URL = `https://default.${routing.tenant}-${routing.homeMarket}.${routing.env}.${routing.domain}`;
+		this.PROFILE_URL = `${this.API_URL}/users/me/profiles/selected`;
+		this.ALLSHOWS_URL = `${this.API_URL}/cms/routes/my-stuff?include=default&decorators=viewingHistory,isFavorite,contentAction,badges&page[items.size]=100`;
+	}
+
+	/* ---------------- SESSION ---------------- */
+
+	async activate(): Promise<void> {
 		try {
-			const now = Utils.unix();
+			await this.initApiUrl();
+			const response = await Requests.send({ url: this.PROFILE_URL, method: 'GET' });
+			const profileData = JSON.parse(response) as HbomaxProfileData;
 
-			const servicesData = await Cache.get('servicesData');
-			let cache = servicesData.get(this.id) as HboMaxData | undefined;
-
-			if (!cache || cache.auth.expiresAt < now) {
-				if (!cache) {
-					const partialSession = await this.getSession();
-					if (!partialSession || !partialSession.auth || !partialSession.deviceSerialNumber) {
-						throw new Error();
-					}
-
-					cache = {
-						subdomain: '',
-						auth: partialSession.auth,
-						deviceSerialNumber: partialSession.deviceSerialNumber,
-					};
-				}
-
-				this.requests = withHeaders({
-					'x-hbo-client-version': this.CLIENT_VERSION,
-				});
-
-				const globalAuthResponseText = await this.requests.send({
-					url: this.GLOBAL_AUTH_URL,
-					method: 'POST',
-					body: {
-						client_id: this.CLIENT_ID,
-						client_secret: this.CLIENT_ID,
-						deviceSerialNumber: cache.deviceSerialNumber,
-						grant_type: 'client_credentials',
-						scope: 'browse video_playback_free',
-					},
-				});
-				const globalAuthResponse = JSON.parse(globalAuthResponseText) as HboMaxAuthResponse;
-
-				this.authRequests = withHeaders(
-					{
-						Authorization: `Bearer ${globalAuthResponse.access_token}`,
-					},
-					this.requests
-				);
-
-				const configResponseText = await this.authRequests.send({
-					url: this.CONFIG_URL,
-					method: 'POST',
-					body: {
-						contract: this.CONTRACT,
-						preferredLanguages: ['en-us'],
-					},
-				});
-				const configResponse = JSON.parse(configResponseText) as HboMaxConfigResponse;
-
-				cache.subdomain = configResponse.routeKeys.userSubdomain;
-
-				if (cache.auth.expiresAt < now) {
-					const localAuthResponseText = await this.authRequests.send({
-						url: Utils.replace(this.LOCAL_AUTH_URL, cache),
-						method: 'POST',
-						body: {
-							refresh_token: cache.auth.refreshToken,
-							grant_type: 'refresh_token',
-							scope: 'browse video_playback device',
-						},
-					});
-					const localAuthResponse = JSON.parse(localAuthResponseText) as HboMaxAuthResponse;
-
-					cache.auth.accessToken = localAuthResponse.access_token;
-					cache.auth.refreshToken = localAuthResponse.refresh_token;
-					cache.auth.expiresAt = now + localAuthResponse.expires_in;
-				}
-
-				servicesData.set(this.id, cache);
-				await Cache.set({ servicesData });
-			}
-
-			this.session = {
-				...cache,
-				profileName: null,
-			};
-
-			this.requests = withHeaders({
-				'x-hbo-client-version': this.CLIENT_VERSION,
-			});
-			this.authRequests = withHeaders(
-				{
-					Authorization: `Bearer ${this.session.auth.accessToken}`,
-				},
-				this.requests
-			);
-
+			const profileName = profileData.data?.attributes?.profileName;
+			if (!profileName) throw new Error('No selected HBO Max profile');
+			this.session = { profileName };
 			this.isActivated = true;
 		} catch (_err) {
+			this.isActivated = false;
 			this.session = null;
 		}
+	}
 
-		if (!this.session) {
-			return;
-		}
+	protected isHistoryCacheValid(): boolean {
+		// This endpoint returns the complete available set on every load.
+		return false;
+	}
 
-		try {
-			const profileResponseId = 'urn:hbo:profiles:mine';
-			const profileResponseText = await this.authRequests.send({
-				url: Utils.replace(this.CONTENT_URL, this.session),
-				method: 'POST',
-				body: [{ id: profileResponseId }],
+	async checkLogin(): Promise<boolean> {
+		if (!this.isActivated) await this.activate();
+		return !!this.session?.profileName;
+	}
+
+	/* ---------------- SHOW LIST ---------------- */
+
+	private async fetchSeriesShowIds(cancelKey: string): Promise<string[]> {
+		const responseText = await Requests.send({ url: this.ALLSHOWS_URL, method: 'GET', cancelKey });
+
+		const allShowsResponse = JSON.parse(responseText) as {
+			included?: Array<{ id: string; attributes?: { showType?: string; name?: string } }>;
+		};
+
+		const showIds =
+			allShowsResponse.included
+				?.filter((item) => item.attributes?.showType === 'SERIES')
+				.map((item) => {
+					if (item.attributes?.name) {
+						this.showNameMap[item.id] = item.attributes.name;
+					}
+					return item.id;
+				}) ?? [];
+
+		return showIds;
+	}
+
+	/* ---------------- HISTORY PAGING ---------------- */
+
+	async loadHistoryForShow(showId: string, cancelKey = 'default'): Promise<HbomaxHistoryItem[]> {
+		const items: HbomaxHistoryItem[] = [];
+		let page = 1;
+		let totalPages = 1;
+		do {
+			const params = new URLSearchParams({
+				decorators: 'viewingHistory',
+				'filter[videoType]': 'EPISODE',
+				'filter[show.id]': showId,
+				'page[size]': '100',
+				'page[number]': String(page),
 			});
-			const profileResponse = JSON.parse(profileResponseText) as HboMaxProfileResponse;
-			const profileResponseItem = profileResponse.find(
-				(currentItem) => currentItem.id === profileResponseId
-			);
+			const response = JSON.parse(
+				await Requests.send({
+					url: `${this.API_URL}/content/videos?${params}`,
+					method: 'GET',
+					cancelKey,
+				})
+			) as { data: HbomaxHistoryItem[]; meta?: { totalPages?: number } };
+			if (!Array.isArray(response.data)) throw new Error('Invalid HBO Max history response');
+			totalPages = response.meta?.totalPages ?? 1;
+			if (!Number.isInteger(totalPages) || totalPages < 0)
+				throw new Error('Invalid HBO Max page count');
+			items.push(...response.data);
+			page++;
+		} while (page <= totalPages);
+		return items;
+	}
 
-			if (profileResponseItem && !('message' in profileResponseItem.body)) {
-				const profile = profileResponseItem.body.profiles.find(
-					(currentProfile) => currentProfile.isMe
-				);
-				if (profile) {
-					this.session.profileName = profile.name;
-				}
+	/* ---------------- LOAD ALL HISTORY ---------------- */
+
+	async loadHistoryItems(cancelKey = 'default'): Promise<HbomaxHistoryItem[]> {
+		if (!this.isActivated) await this.activate();
+		if (!this.session) throw new Error('Invalid API session');
+
+		this.hasReachedHistoryEnd = false;
+		const showIds = [...new Set(await this.fetchSeriesShowIds(cancelKey))];
+
+		const allHistoryItems: HbomaxHistoryItem[] = [];
+		const concurrency = 5;
+
+		for (let i = 0; i < showIds.length; i += concurrency) {
+			const batch = showIds.slice(i, i + concurrency);
+
+			const results = await Promise.all(batch.map((id) => this.loadHistoryForShow(id, cancelKey)));
+
+			for (const items of results) {
+				allHistoryItems.push(...items);
 			}
-		} catch (_err) {
-			// Do nothing
-		}
-	}
-
-	async checkLogin() {
-		if (!this.isActivated) {
-			await this.activate();
-		}
-		return !!this.session && !!this.session.profileName;
-	}
-
-	async loadHistoryItems(cancelKey = 'default'): Promise<HboMaxHistoryItem[]> {
-		if (!this.isActivated) {
-			await this.activate();
-		}
-		if (!this.session) {
-			throw new Error('Invalid API session');
 		}
 
-		const historyItems: HboMaxHistoryItem[] = [];
-
-		const historyResponseText = await this.authRequests.send({
-			url: Utils.replace(this.HISTORY_URL, this.session),
-			method: 'GET',
-			cancelKey,
-		});
-		const historyResponse = JSON.parse(historyResponseText) as HboMaxHistoryResponse;
-		const historyResponseItems = historyResponse.filter(
-			(item) => item.id.startsWith('urn:hbo:episode') || item.id.startsWith('urn:hbo:feature')
+		const viewedEpisodes = allHistoryItems.filter(
+			(i) => i.attributes.videoType === 'EPISODE' && i.attributes.viewingHistory?.viewed
 		);
 
-		for (const historyResponseItem of historyResponseItems) {
-			historyItems.push({
-				id: historyResponseItem.id,
-				progress:
-					Math.round((historyResponseItem.position / historyResponseItem.runtime) * 10000) / 100,
-				watchedAt: Utils.unix(historyResponseItem.created),
-			});
-		}
-
+		viewedEpisodes.sort(
+			(a, b) =>
+				(historyDateToUnix(b.attributes.viewingHistory?.lastReportedTimestamp) ?? 0) -
+				(historyDateToUnix(a.attributes.viewingHistory?.lastReportedTimestamp) ?? 0)
+		);
 		this.hasReachedHistoryEnd = true;
 
-		return historyItems;
+		return viewedEpisodes.map((item) => ({
+			...item,
+			showName: this.showNameMap[item.relationships.show.data.id],
+		}));
 	}
 
-	isNewHistoryItem(historyItem: HboMaxHistoryItem, lastSync: number) {
-		return historyItem.watchedAt > lastSync;
-	}
+	/* ---------------- CONVERT ---------------- */
 
-	getHistoryItemId(historyItem: HboMaxHistoryItem) {
-		return historyItem.id;
-	}
-
-	async convertHistoryItems(historyItems: HboMaxHistoryItem[]) {
+	async convertHistoryItems(historyItems: HbomaxHistoryItem[]): Promise<ScrobbleItem[]> {
 		const items: ScrobbleItem[] = [];
 
-		for (const historyItem of historyItems) {
-			const item = await this.getItem(historyItem.id);
-			if (item) {
-				item.progress = historyItem.progress;
-				item.watchedAt = Utils.unix(historyItem.watchedAt);
-				items.push(item);
-			}
+		for (const ep of historyItems) {
+			const showId = ep.relationships.show.data.id ?? '';
+			const showName = ep.showName ?? this.showNameMap[showId] ?? '';
+
+			const watchedAt = historyDateToUnix(ep.attributes.viewingHistory?.lastReportedTimestamp);
+			const releasedAt = historyDateToUnix(
+				ep.attributes.airDate ?? ep.attributes.firstAvailableDate
+			);
+
+			items.push(
+				new EpisodeItem({
+					serviceId: this.id,
+					id: ep.id,
+					title: ep.attributes.name,
+					season: ep.attributes.seasonNumber,
+					number: ep.attributes.episodeNumber,
+					year: releasedAt === undefined ? undefined : new Date(releasedAt * 1000).getUTCFullYear(),
+					watchedAt,
+					progress: ep.attributes.viewingHistory?.completed ? 100 : 0,
+					show: {
+						serviceId: this.id,
+						id: showId,
+						title: showName,
+					},
+				})
+			);
 		}
 
 		return items;
 	}
 
-	updateItemFromHistory(
-		item: ScrobbleItemValues,
-		historyItem: HboMaxHistoryItem
-	): Promisable<void> {
-		item.watchedAt = Utils.unix(historyItem.watchedAt);
-		item.progress = historyItem.progress;
-	}
-
-	parseItemMetadata(id: string, itemMetadata: HboMaxItemMetadata) {
-		let item: ScrobbleItem;
-
-		const serviceId = this.id;
-		const { releaseYear: year } = itemMetadata;
-
-		if ('seriesTitles' in itemMetadata) {
-			const title = itemMetadata.seriesTitles.full.trim();
-			const { seasonNumber: season, numberInSeason: number } = itemMetadata;
-			const episodeTitle = itemMetadata.titles.full.trim();
-
-			item = new EpisodeItem({
-				serviceId,
-				id,
-				title: episodeTitle,
-				year,
-				season,
-				number,
-				show: {
-					serviceId,
-					title,
-					year,
-				},
-			});
-		} else {
-			const title = itemMetadata.titles.full.trim();
-
-			item = new MovieItem({
-				serviceId,
-				id,
-				title,
-				year,
-			});
-		}
-
-		return item;
-	}
-
-	async getItem(id: string): Promise<ScrobbleItem | null> {
-		let item: ScrobbleItem | null = null;
-
-		if (!this.isActivated) {
-			await this.activate();
-		}
-		if (!this.session) {
-			throw new Error('Invalid API session');
-		}
-
-		try {
-			const responseText = await this.authRequests.send({
-				url: Utils.replace(this.CONTENT_URL, this.session),
-				method: 'POST',
-				body: [{ id }],
-			});
-			const response = JSON.parse(responseText) as HboMaxItemMetadataResponse;
-
-			const responseItem = response.find((currentItem) => currentItem.id === id);
-			if (responseItem && !('message' in responseItem.body)) {
-				const itemMetadata = responseItem.body;
-				item = this.parseItemMetadata(id, itemMetadata);
-			}
-		} catch (err) {
-			if (Shared.errors.validate(err)) {
-				Shared.errors.error('Failed to get item.', err);
-			}
-		}
-
-		return item;
-	}
-
-	async getSession(): Promise<Partial<HboMaxSession> | null> {
-		const result = await ScriptInjector.inject<Partial<HboMaxSession>>(
-			this.id,
-			'session',
-			this.HOST_URL
+	updateItemFromHistory(item: ScrobbleItemValues, historyItem: HbomaxHistoryItem): void {
+		item.watchedAt = historyDateToUnix(
+			historyItem.attributes.viewingHistory?.lastReportedTimestamp
 		);
-		if (result?.auth) {
-			result.auth.expiresAt = Utils.unix(result.auth.expiresAt);
-		}
-		return result;
+
+		item.progress = historyItem.attributes.viewingHistory?.completed ? 100 : 0;
+	}
+
+	isNewHistoryItem(historyItem: HbomaxHistoryItem, lastSync: number): boolean {
+		const watchedAt = historyDateToUnix(
+			historyItem.attributes.viewingHistory?.lastReportedTimestamp
+		);
+		return watchedAt === undefined || watchedAt > lastSync;
+	}
+
+	getHistoryItemId(historyItem: HbomaxHistoryItem): string {
+		return historyItem.id;
+	}
+
+	async getItem(_id: string): Promise<ScrobbleItem | null> {
+		// Playback metadata is read from the player DOM, including movies.
+		return null;
 	}
 }
 
-Shared.functionsToInject[`${HboMaxService.id}-session`] = () => {
-	const session: Partial<HboMaxSession> = {};
-
-	const authStr = window.localStorage.getItem('authToken');
-	if (authStr) {
-		const authObj = JSON.parse(authStr) as HboMaxAuthObj;
-		session.auth = {
-			accessToken: authObj.access_token,
-			refreshToken: authObj.refresh_token,
-			expiresAt: authObj.expires_on,
-		};
-	}
-
-	const deviceSerialNumber = window.localStorage.getItem('deviceSerialNumber');
-	if (deviceSerialNumber) {
-		session.deviceSerialNumber = deviceSerialNumber;
-	}
-
-	return session;
-};
-
-export const HboMaxApi = new _HboMaxApi();
+export const HboMaxApi = new _HbomaxApi();
