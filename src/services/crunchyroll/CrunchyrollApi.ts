@@ -18,6 +18,7 @@ export interface CrunchyrollTokenData {
 
 export interface CrunchyrollProfileData {
 	username: string;
+	profile_name?: string;
 }
 
 export interface CrunchyrollHistoryPage {
@@ -121,7 +122,7 @@ export class _CrunchyrollApi extends ServiceApi {
 		expirationDate.setSeconds(expirationDate.getSeconds() + tokenData.expires_in - 5);
 
 		this.session = {
-			profileName: profileData.username,
+			profileName: profileData.profile_name || profileData.username,
 			tokenExpirationDate: expirationDate,
 			accountId: tokenData.account_id,
 		};
