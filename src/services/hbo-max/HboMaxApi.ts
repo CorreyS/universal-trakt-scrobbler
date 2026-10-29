@@ -46,7 +46,7 @@ export interface CachedRouting {
 }
 
 // Adapted from upstream PR #463; pagination state is local to each show.
-class _HbomaxApi extends ServiceApi {
+export class _HbomaxApi extends ServiceApi {
 	public session: HbomaxSession | null = null;
 	public hasReachedHistoryEnd = false;
 	public showNameMap: Record<string, string> = {};
@@ -59,8 +59,8 @@ class _HbomaxApi extends ServiceApi {
 	private ALLSHOWS_URL =
 		`${this.API_URL}/cms/routes/my-stuff?include=default&decorators=viewingHistory,isFavorite,contentAction,badges&page[items.size]=100`;
 
-	constructor() {
-		super(HboMaxService.id);
+	constructor(register = true) {
+		super(HboMaxService.id, register);
 	}
 
 	private async send(request: RequestDetails): Promise<string> {

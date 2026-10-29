@@ -1,3 +1,4 @@
+import { HistoryExport } from './HistoryExport';
 import { I18N } from '@common/I18N';
 import { Session } from '@common/Session';
 import { Tabs } from '@common/Tabs';
@@ -92,6 +93,7 @@ export const HistoryHeader = (): JSX.Element => {
 					}
 					right={
 						<>
+							<HistoryExport />
 							{isLoggedIn && (
 								<Button
 									color="inherit"

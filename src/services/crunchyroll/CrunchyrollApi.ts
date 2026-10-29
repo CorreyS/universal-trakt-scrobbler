@@ -63,7 +63,7 @@ export interface CrunchyrollThumbnail {
 	width: number;
 }
 
-class _CrunchyrollApi extends ServiceApi {
+export class _CrunchyrollApi extends ServiceApi {
 	HOST_URL: string;
 	TOKEN_URL: string;
 	PROFILE_URL: string;
@@ -78,8 +78,8 @@ class _CrunchyrollApi extends ServiceApi {
 
 	authRequests = Requests;
 
-	constructor() {
-		super(CrunchyrollService.id);
+	constructor(register = true) {
+		super(CrunchyrollService.id, register);
 
 		this.HOST_URL = 'https://www.crunchyroll.com';
 		this.TOKEN_URL = `${this.HOST_URL}/auth/v1/token`;

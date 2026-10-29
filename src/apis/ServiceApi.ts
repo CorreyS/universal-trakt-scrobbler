@@ -34,10 +34,10 @@ export abstract class ServiceApi {
 	nextHistoryUrl = '';
 	session?: ServiceApiSession | null;
 
-	constructor(id: string) {
+	constructor(id: string, register = true) {
 		this.id = id;
 
-		registerServiceApi(this.id, this);
+		if (register) registerServiceApi(this.id, this);
 	}
 
 	static async loadTraktHistory(
