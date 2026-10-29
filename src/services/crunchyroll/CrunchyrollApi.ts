@@ -12,6 +12,8 @@ export interface CrunchyrollSession extends ServiceApiSession {
 
 export interface CrunchyrollTokenData {
 	access_token: string;
+	refresh_token?: string;
+	profile_id?: string;
 	account_id: string;
 	expires_in: number;
 }
@@ -78,6 +80,8 @@ export class _CrunchyrollApi extends ServiceApi {
 	dubSubSuffix: RegExp = / \((?:\w+ )?(?:Dub|Dubbed|Sub|Subbed|Subtitled)\)/;
 
 	authRequests = Requests;
+	private refreshToken?: string;
+	private exportProfileName?: string;
 
 	constructor(register = true) {
 		super(CrunchyrollService.id, register);
@@ -107,6 +111,7 @@ export class _CrunchyrollApi extends ServiceApi {
 			)}&grant_type=etp_rt_cookie`,
 		});
 		const tokenData = JSON.parse(response) as CrunchyrollTokenData;
+		this.refreshToken = tokenData.refresh_token;
 		this.authRequests = withHeaders({
 			Authorization: `Bearer ${tokenData.access_token}`,
 		});
@@ -129,9 +134,54 @@ export class _CrunchyrollApi extends ServiceApi {
 		this.isActivated = true;
 	}
 
+	async selectExportProfile(name: string) {
+		await this.activate();
+		const response = await this.authRequests.send({
+			url: `${this.HOST_URL}/accounts/v1/me/multiprofile`,
+			method: 'GET',
+		});
+		const data = JSON.parse(response) as {
+			profiles?: { profile_id: string; profile_name: string }[];
+		};
+		const matches =
+			data.profiles?.filter((p) => p.profile_name.toLowerCase() === name.trim().toLowerCase()) ??
+			[];
+		if (matches.length !== 1 || !this.refreshToken)
+			throw new Error('Could not identify requested Crunchyroll profile');
+		const profile = matches[0];
+		const tokenResponse = await Requests.send({
+			url: this.TOKEN_URL,
+			method: 'POST',
+			headers: {
+				Authorization: `Basic ${this.TOKEN_AUTH}`,
+				'Content-Type': 'application/x-www-form-urlencoded',
+			},
+			body: new URLSearchParams({
+				grant_type: 'refresh_token_profile_id',
+				refresh_token: this.refreshToken,
+				profile_id: profile.profile_id,
+				device_id: this.DEVICE_ID,
+				device_type: this.DEVICE_NAME,
+			}).toString(),
+		});
+		const token = JSON.parse(tokenResponse) as CrunchyrollTokenData;
+		if (!token.access_token || token.profile_id !== profile.profile_id)
+			throw new Error('Crunchyroll profile verification failed');
+		this.authRequests = withHeaders({ Authorization: `Bearer ${token.access_token}` });
+		this.refreshToken = token.refresh_token;
+		this.session = {
+			profileName: profile.profile_name,
+			accountId: token.account_id,
+			tokenExpirationDate: new Date(Date.now() + (token.expires_in - 5) * 1000),
+		};
+		this.exportProfileName = profile.profile_name;
+		this.isActivated = true;
+	}
+
 	async checkLogin() {
 		if (!this.isActivated || !this.session || new Date() >= this.session.tokenExpirationDate) {
-			await this.activate();
+			if (this.exportProfileName) await this.selectExportProfile(this.exportProfileName);
+			else await this.activate();
 		}
 		return !!this.session && this.session.profileName !== null;
 	}

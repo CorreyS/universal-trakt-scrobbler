@@ -8,6 +8,7 @@ import {
 	DialogContent,
 	DialogActions,
 	Typography,
+	TextField,
 } from '@mui/material';
 import { useState } from 'react';
 
@@ -19,6 +20,7 @@ const cell = (value: unknown): string => {
 
 export const HistoryExport = (): JSX.Element => {
 	const [open, setOpen] = useState(false);
+	const [profileName, setProfileName] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [status, setStatus] = useState(
 		'Export all available Crunchyroll and HBO episode history. HBO includes shows in My Stuff only. Cached matches are included without making Trakt requests.'
@@ -56,6 +58,8 @@ export const HistoryExport = (): JSX.Element => {
 			const caches = await Cache.get(['itemsToTraktItems', 'traktItems']);
 			const apis = [new _CrunchyrollApi(false), new _HbomaxApi(false)] as const;
 			for (const api of apis) {
+				if (api instanceof _CrunchyrollApi && profileName.trim())
+					await api.selectExportProfile(profileName);
 				const cursors = new Set<string>();
 				let count = 0;
 				while (!api.hasReachedHistoryEnd) {
@@ -130,6 +134,14 @@ export const HistoryExport = (): JSX.Element => {
 				<DialogTitle>Export episode history</DialogTitle>
 				<DialogContent>
 					<Typography>{status}</Typography>
+					<TextField
+						label="Crunchyroll profile name (optional)"
+						value={profileName}
+						disabled={busy}
+						onChange={(event) => setProfileName(event.target.value)}
+						fullWidth
+						margin="normal"
+					/>
 				</DialogContent>
 				<DialogActions>
 					<Button disabled={busy} onClick={() => setOpen(false)}>
